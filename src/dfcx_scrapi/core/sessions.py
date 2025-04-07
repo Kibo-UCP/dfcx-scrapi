@@ -201,6 +201,25 @@ class Sessions(ScrapiBase):
 
         return tool_responses
 
+    def collect_client_tool_responses(
+        self, res: types.session.QueryResult
+    ) -> List[Dict[str, str]]:
+        """Gather all the tool responses into a list of dicts."""
+        tool_responses = []
+        for response_message in res.response_messages:
+            if response_message.tool_call:
+                tool_responses.append(
+                    {
+                        "tool_name": self.get_tool_name(response_message.tool_call),
+                        "tool_action": self.get_tool_action(response_message.tool_call),
+                        "input_params": self.get_tool_params(
+                            response_message.tool_call.input_parameters),
+                        "tool": response_message.tool_call.tool,
+                    }
+                )
+
+        return tool_responses
+
     def collect_playbook_responses(
         self, res: types.session.QueryResult
     ) -> List[Dict[str, str]]:
@@ -291,7 +310,8 @@ class Sessions(ScrapiBase):
         end_user_metadata: Dict[str, Any] = None,
         populate_data_store_connection_signals: bool = False,
         intent_id: str = None,
-        timezone: str = None
+        timezone: str = None,
+        query_input = None
     ):
         """Returns the result of detect intent with texts as inputs.
 
@@ -339,12 +359,12 @@ class Sessions(ScrapiBase):
                 "<Agent ID>/sessions/<Session ID>`.\n\n"
                 "Utilize `build_session_id` to create a new Session ID."
             )
-
-        if intent_id:
-            query_input = self.build_intent_query_input(
-                intent_id, language_code)
-        else:
-            query_input = self._build_query_input(text, language_code)
+        if not query_input:
+            if intent_id:
+                query_input = self.build_intent_query_input(
+                    intent_id, language_code)
+            else:
+                query_input = self._build_query_input(text, language_code)
 
         request = types.session.DetectIntentRequest()
         request.session = session_id

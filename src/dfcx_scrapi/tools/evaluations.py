@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 from ast import literal_eval
 from dataclasses import dataclass, field
@@ -416,17 +417,47 @@ class Evaluations(ScrapiBase):
             if row["action_type"] != "User Utterance":
                 continue
 
+
             session_parameters = None
 
             if "session_parameters" in row:
                 session_parameters = self.str_to_dict(row["session_parameters"])
 
-            res = self.sessions_client.detect_intent(
-                agent_id=self.agent_id,
-                session_id=self.session_id,
-                text=row["action_input"],
-                parameters=session_parameters
-            )
+            if row["action_type"] == "User Utterance":
+                res = self.sessions_client.detect_intent(
+                    agent_id=self.agent_id,
+                    session_id=self.session_id,
+                    text=row["action_input"],
+                    parameters=session_parameters
+                )
+                tool_responses = self.sessions_client.collect_client_tool_responses(res)
+                if len(tool_responses) > 0:
+                    last_tool_responses = tool_responses[-1]
+                    
+                    tool_name = last_tool_responses.get("tool_name", None)
+                    tool_action = last_tool_responses.get("tool_action", None)
+                    next_tool_action_row = df.loc[
+                        (df.index > index) & (df["tool_action"] == tool_action)
+                    ]
+                    if next_tool_action_row is not None:
+                        next_tool_action_row = next_tool_action_row.index.min()
+                        action_output_str = df.loc[next_tool_action_row, "action_output"]
+                        action_output_json = json.loads(action_output_str)
+       
+                        tool_call_result = types.ToolCallResult( 
+                            tool=last_tool_responses.get("tool", None),
+                            action = last_tool_responses.get("tool_action", None),
+                            output_parameters = action_output_json,
+                        )
+                        res = self.sessions_client.detect_intent(
+                            agent_id=self.agent_id,
+                            session_id=self.session_id,
+                            query_input=types.QueryInput(tool_call_result=tool_call_result, language_code="en"),
+                            parameters=session_parameters
+                        )
+
+
+            
             # Add data to the existing row
             df.loc[index, ["session_id", "agent_id"]] = [
                 data["session_id"],
@@ -472,6 +503,18 @@ class Evaluations(ScrapiBase):
             if "tool_call_quality" in self.user_input_metrics:
                 tool_responses = (
                     self.sessions_client.collect_tool_responses(res)
+                )
+                if tool_responses:  # Only call if not empty
+                    df = self.process_tool_invocations(
+                        tool_responses,
+                        index,
+                        row,
+                        df
+                    )
+            # Handle Client Tool Invocations
+            if "tool_call_quality" in self.user_input_metrics:
+                tool_responses = (
+                    self.sessions_client.collect_client_tool_responses(res)
                 )
                 if tool_responses:  # Only call if not empty
                     df = self.process_tool_invocations(
