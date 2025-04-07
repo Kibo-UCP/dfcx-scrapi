@@ -513,7 +513,8 @@ class Evaluations(ScrapiBase):
         next_tool_action_row = df.loc[
                     (df.index > index) & (df["action_input"] == tool_name)
                 ]
-        if next_tool_action_row is not None:
+        if isinstance(next_tool_action_row, pd.DataFrame) and not next_tool_action_row.empty:
+   
             next_tool_action_row = next_tool_action_row.index.min()
             action_output_str = df.loc[next_tool_action_row, "action_output"]
             action_output_json = json.loads(action_output_str)
@@ -919,7 +920,9 @@ class DataLoader:
         except gspread.exceptions.WorksheetNotFound:
             sheet = gsheet.add_worksheet(title=summary_tab, rows="100", cols="20")
 
-
+        # If the sheet is empty, add a header row
+        if not sheet.get_all_values():
+            sheet.append_row(summary.columns.tolist(), value_input_option="USER_ENTERED")
         sheet.append_rows(
             summary.values.tolist(), value_input_option="USER_ENTERED"
         )
