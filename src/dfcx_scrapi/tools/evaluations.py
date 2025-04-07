@@ -26,6 +26,7 @@ import pandas as pd
 from google.cloud.dialogflowcx_v3beta1 import types
 from google.oauth2 import service_account
 from tqdm import tqdm
+import gspread
 
 from dfcx_scrapi.core.agents import Agents
 from dfcx_scrapi.core.conversation_history import ConversationHistory
@@ -430,31 +431,7 @@ class Evaluations(ScrapiBase):
                     text=row["action_input"],
                     parameters=session_parameters
                 )
-                tool_responses = self.sessions_client.collect_client_tool_responses(res)
-                if len(tool_responses) > 0:
-                    last_tool_responses = tool_responses[-1]
-                    
-                    tool_name = last_tool_responses.get("tool_name", None)
-                    tool_action = last_tool_responses.get("tool_action", None)
-                    next_tool_action_row = df.loc[
-                        (df.index > index) & (df["tool_action"] == tool_action)
-                    ]
-                    if next_tool_action_row is not None:
-                        next_tool_action_row = next_tool_action_row.index.min()
-                        action_output_str = df.loc[next_tool_action_row, "action_output"]
-                        action_output_json = json.loads(action_output_str)
-       
-                        tool_call_result = types.ToolCallResult( 
-                            tool=last_tool_responses.get("tool", None),
-                            action = last_tool_responses.get("tool_action", None),
-                            output_parameters = action_output_json,
-                        )
-                        res = self.sessions_client.detect_intent(
-                            agent_id=self.agent_id,
-                            session_id=self.session_id,
-                            query_input=types.QueryInput(tool_call_result=tool_call_result, language_code="en"),
-                            parameters=session_parameters
-                        )
+                res = self.process_client_tool_responses(df, index, session_parameters, res)
 
 
             
@@ -525,6 +502,35 @@ class Evaluations(ScrapiBase):
                     )
 
         return df
+
+    def process_client_tool_responses(self, df, index, session_parameters, res):
+        client_tool_responses = self.sessions_client.collect_client_tool_responses(res)
+        if len(client_tool_responses) == 0:
+            return res
+        
+        last_tool_responses = client_tool_responses[-1]         
+        tool_name = last_tool_responses.get("tool_name", None)
+        next_tool_action_row = df.loc[
+                    (df.index > index) & (df["action_input"] == tool_name)
+                ]
+        if next_tool_action_row is not None:
+            next_tool_action_row = next_tool_action_row.index.min()
+            action_output_str = df.loc[next_tool_action_row, "action_output"]
+            action_output_json = json.loads(action_output_str)
+    
+            tool_call_result = types.ToolCallResult( 
+                        tool=last_tool_responses.get("tool", None),
+                        action = last_tool_responses.get("tool_action", None),
+                        output_parameters = action_output_json,
+                    )
+            res = self.sessions_client.detect_intent(
+                        agent_id=self.agent_id,
+                        session_id=self.session_id,
+                        query_input=types.QueryInput(tool_call_result=tool_call_result, language_code="en"),
+                        parameters=session_parameters
+                    )
+                
+        return res
 
     def insert_unexpected_rows(self, df: pd.DataFrame) -> pd.DataFrame:
         """Insert any unexpected rows collected during runtime."""
@@ -821,6 +827,16 @@ class DataLoader:
 
         return existing_sheet
 
+    def create_sheet(self, sheet_name: str):
+        try:
+            sheet = self.dffx.sheets_client.open(sheet_name)
+        except gspread.exceptions.SpreadsheetNotFound:
+          # If the sheet doesn't exist, create it
+          sheet = self.dffx.sheets_client.create(sheet_name)
+          # Share the sheet with the service account (optional, but recommended)
+          sheet.share(self.dffx.creds.service_account_email, perm_type='user', role='writer')
+
+
     def create_sheet_tab(self, df: pd.DataFrame, results_tab: str):
         sheet = self.dffx.sheets_client.open(self.sheet_name)
         sheet.add_worksheet(results_tab, rows=df.shape[0], cols=df.shape[1])
@@ -828,6 +844,9 @@ class DataLoader:
     def write_eval_results_to_sheets(
         self, df: pd.DataFrame, sheet_name: str, results_tab: str = None
     ):
+         # Check if the worksheet exists, and create it if it doesn't
+        self.create_sheet(sheet_name)
+       
         tab_name_exists = self.check_existing_tab_name(sheet_name, results_tab)
         if results_tab and not tab_name_exists:
             self.create_sheet_tab(df, results_tab)
@@ -893,7 +912,13 @@ class DataLoader:
 
         client = self.dffx.sheets_client
         gsheet = client.open(sheet_name)
-        sheet = gsheet.worksheet(summary_tab)
+        
+        # Check if the worksheet exists, and create it if it doesn't
+        try:
+            sheet = gsheet.worksheet(summary_tab)
+        except gspread.exceptions.WorksheetNotFound:
+            sheet = gsheet.add_worksheet(title=summary_tab, rows="100", cols="20")
+
 
         sheet.append_rows(
             summary.values.tolist(), value_input_option="USER_ENTERED"
